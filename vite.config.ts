@@ -11,7 +11,7 @@ export default defineConfig(({mode}) => {
       react(), 
       tailwindcss(),
       nodePolyfills({
-        include: ['buffer', 'crypto', 'stream', 'util', 'path', 'events'],
+        include: ['buffer', 'crypto', 'stream', 'util', 'path', 'events', 'process', 'os', 'vm', 'constants'],
         globals: {
           Buffer: true,
           global: true,
@@ -21,6 +21,8 @@ export default defineConfig(({mode}) => {
     ],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+      global: 'globalThis',
+      'process.browser': true,
     },
     resolve: {
       alias: {
