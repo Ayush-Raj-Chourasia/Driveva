@@ -1,0 +1,256 @@
+
+
+# Implementation Plan - TeleDrive (Telegram-based Google Drive Wrapper)
+
+Build a fully functional Android app (via Capacitor) that uses Telegram as a backend storage provider. The app will feature a Google Drive-like interface, secure authentication, and optimized file management.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Telegram API Credentials**: To use Telegram's MTProto API, you must obtain an `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org). These will be required in the `.env` file.
+> **Security**: The app will store the Telegram session locally. While MTProto is secure, we can add optional client-side encryption for files before they are uploaded to Telegram.
+
+## Proposed Changes
+
+### 1. Foundation & Dependencies
+
+#### [MODIFY] [package.json](file:///c:/Users/iters/Downloads/Driveva/package.json)
+Add necessary dependencies for Telegram, local database, and Android packaging:
+- `telegram` (gramjs): MTProto client.
+- `dexie` & `dexie-react-hooks`: For local metadata storage.
+- `@capacitor/core`, `@capacitor/android`, `@capacitor/cli`: For Android packaging.
+- `buffer`: Required for `gramjs` in the browser.
+
+### 2. Core Logic & Services
+
+#### [NEW] [telegram.ts](file:///c:/Users/iters/Downloads/Driveva/src/lib/telegram.ts)
+Implement `TelegramService` to handle:
+- Connection and session management.
+- Login flow (Phone -> OTP -> Session).
+- File upload/download using `gramjs`.
+- Fetching files from a specific chat (e.g., "Saved Messages").
+
+#### [NEW] [db.ts](file:///c:/Users/iters/Downloads/Driveva/src/lib/db.ts)
+Configure Dexie.js to store:
+- `files`: { id, name, size, type, messageId, folderId, createdAt, telegramFileId }
+- `folders`: { id, name, parentId, createdAt }
+- `settings`: { key, value }
+
+### 3. Views & Components
+
+#### [MODIFY] [DriveView.tsx](file:///c:/Users/iters/Downloads/Driveva/src/views/DriveView.tsx)
+- Connect to `dexie` to list real folders and files.
+- Implement "New Folder" logic.
+- Implement "Upload" trigger.
+- Implement "Navigate" between folders.
+
+#### [NEW] [LoginView.tsx](file:///c:/Users/iters/Downloads/Driveva/src/views/LoginView.tsx)
+- Screen for entering phone number and OTP.
+- Handle Telegram authentication.
+
+#### [MODIFY] [App.tsx](file:///c:/Users/iters/Downloads/Driveva/src/App.tsx)
+- Add authentication check.
+- Show `LoginView` if not authenticated.
+- Manage global states (loading, errors).
+
+### 4. Android Integration
+
+- Initialize Capacitor: `npx cap init`
+- Add Android platform: `npx cap add android`
+- Configure `AndroidManifest.xml` for permissions.
+
+## Verification Plan
+
+### Automated Tests
+- Mock Telegram API responses to test file listing and folder navigation.
+- Test local DB CRUD operations.
+
+### Manual Verification
+- Perform a full login flow with a real Telegram account.
+- Upload a file and verify it appears in Telegram "Saved Messages".
+- Download the file back and verify integrity.
+- Create a folder, move a file into it, and verify the UI state persists after reload.
+
+
+continue to built full 
+i have given u crediential 
+
+and 
+Use private channels
+Store metadata locally remebre metadata must be same as the local file has 
+Folder structure logic:
+- Root
+- Nested folders
+- File mapping
+and if file had beed uploaded and now user is fetching it downloading it or viweing it it quickly happen 
+implkement the uploading file logic which google drive uses 
+make sure considering all edge cases on uploading 
+
+
+Permissions (You must verify)
+
+In Android:
+Storage access
+Internet
+File access (Android 13+ scoped storage)
+
+You must understand:
+
+2GB/file
+Rate limits
+Possible account restrictions
+
+if file incerase to 2 gb the split it and uplaod inparts and whn user is downloading it again join it and make it no dataloss
+
+
+1. ❌ Browser + GramJS + Capacitor = Potential Breakage
+
+You’re using:
+
+gramjs (Node-oriented)
+React (browser)
+Capacitor (WebView)
+
+👉 Problem:
+
+gramjs depends on Node features (Buffer, crypto, etc.)
+Even with polyfills → unstable in Android WebView
+🔥 Risk:
+Login may fail
+Upload/download may crash
+Random runtime errors
+✅ Fix:
+Ensure:
+buffer, crypto, stream polyfills
+OR better:
+Move Telegram logic to native layer or backend
+
+
+2. ❌ No File Chunking Strategy
+
+Right now:
+
+“Upload file using gramjs”
+
+👉 That’s incomplete.
+
+Problem:
+Telegram limit:
+2GB (free)
+4GB (premium)
+Large uploads fail silently sometimes
+✅ You must define:
+Chunking system
+
+
+3. ❌ No Retry / Failure Handling
+
+What if:
+
+Network drops?
+Upload fails midway?
+Telegram rate limits?
+
+👉 Currently: app will break
+
+✅ Add:
+Retry queue
+Upload state tracking
+Resume logic
+
+
+4. ❌ No Sync Strategy (Very Important)
+
+Right now:
+
+You store metadata in Dexie
+But Telegram is source of truth
+Problem:
+If user clears storage → data gone
+If app reinstall → folders lost
+Telegram still has files but no structure
+✅ You need:
+
+At least one:
+
+Store metadata in:
+message captions (hack)
+OR separate “index message”
+
+5. ❌ Folder System Not Fully Defined
+
+You wrote:
+
+folders: { id, parentId }
+
+👉 But missing:
+
+How files move between folders?
+How folder deletion works?
+Recursive delete?
+Rename?
+
+👉 This will break UI consistency
+
+7. ❌ No Rate Limit Handling
+
+Telegram has:
+
+Flood limits
+API throttling
+Without handling:
+App suddenly stops working
+8. ❌ Android Storage Permissions (Missing Detail)
+
+You said:
+
+configure permissions
+
+But Android 11+:
+
+Scoped storage rules apply
+File picker needed
+Direct file path access limited
+
+9. ❌ No Background Upload Handling
+
+Capacitor WebView:
+
+Kills tasks when app minimized
+Result:
+Upload stops if user switches app
+Fix:
+Use:
+Background task plugin
+OR native service
+
+10. ❌ No Pagination / Performance Handling
+
+If user has:
+
+1000+ files
+
+👉 Your app will:
+
+lag
+crash
+Fix:
+Lazy loading
+Pagination
+Virtualized lists
+11. ❌ No File Type Handling
+
+You need:
+
+Image preview
+Video player
+Document handling
+12. ❌ No Cache Strategy
+
+Without cache:
+
+Every load = network call
+Bad UX
+
+so built it now 
+
