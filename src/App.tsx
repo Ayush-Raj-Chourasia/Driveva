@@ -13,6 +13,7 @@ import UploadView from './views/UploadView';
 import PreviewView from './views/PreviewView';
 import LoginView from './views/LoginView';
 import { db } from './lib/db';
+import TransferOverlay from './components/TransferOverlay';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('drive');
@@ -30,7 +31,9 @@ export default function App() {
   };
 
   if (isAuthenticated === null) {
-    return <div className="min-h-screen bg-background flex items-center justify-center">Loading...</div>;
+    return <div className="min-h-screen bg-background flex items-center justify-center text-primary font-bold">
+      <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>⏳</motion.div>
+    </div>;
   }
 
   if (!isAuthenticated) {
@@ -52,7 +55,7 @@ export default function App() {
       case 'recent':
         return (
           <div className="flex flex-col items-center justify-center h-[50vh] text-center opacity-40">
-            <div className="w-24 h-24 rounded-full bg-surface-container-highest flex items-center justify-center mb-4">
+            <div className="w-24 h-24 rounded-full bg-surface-container-highest flex items-center justify-center mb-4 text-4xl">
               {activeTab === 'shared' ? '👥' : '🕒'}
             </div>
             <h2 className="text-xl font-bold">Soon!</h2>
@@ -65,7 +68,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-background pb-32">
+    <div className="min-h-screen bg-background pb-32 overflow-x-hidden">
       <TopNav />
       
       <main className="pt-24 px-6 max-w-7xl mx-auto">
@@ -75,22 +78,7 @@ export default function App() {
       </main>
 
       <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />
-
-      {/* Action shortcuts for demo */}
-      <div className="fixed bottom-24 right-6 flex flex-col gap-3 md:hidden">
-        <button 
-          onClick={() => setIsUploading(true)}
-          className="w-12 h-12 rounded-full bg-white shadow-lg border border-primary-container/30 flex items-center justify-center text-primary"
-        >
-          ☁️
-        </button>
-        <button 
-          onClick={() => setIsPreviewOpen(true)}
-          className="w-12 h-12 rounded-full bg-white shadow-lg border border-primary-container/30 flex items-center justify-center text-primary"
-        >
-          👁️
-        </button>
-      </div>
+      <TransferOverlay />
 
       <AnimatePresence>
         {isUploading && (

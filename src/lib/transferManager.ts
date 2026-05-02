@@ -1,10 +1,12 @@
-import { db, type UploadQueueItem } from './db';
+import { db, type UploadQueueItem, type DownloadQueueItem } from './db';
 import { getClient } from './telegram/client';
 import { getDriveChannelId, pushSyncState } from './telegram/sync';
 import { Api } from 'telegram';
 import { errors } from 'telegram';
 import { App } from '@capacitor/app';
 import { BackgroundTask } from '@capawesome/capacitor-background-task';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 
 const CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024; // 1.9GB
 
@@ -20,8 +22,15 @@ export class TransferManager {
   static getInstance() {
     if (!TransferManager.instance) {
       TransferManager.instance = new TransferManager();
+      TransferManager.instance.init();
     }
     return TransferManager.instance;
+  }
+
+  private async init() {
+    // Resume pending transfers
+    this.processQueue();
+    this.processDownloadQueue();
   }
 
   private setupBackgroundHooks() {
@@ -154,15 +163,69 @@ export class TransferManager {
     const file = await db.files.get(fileId);
     if (!file) return;
 
+    const item: DownloadQueueItem = {
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      progress: 0,
+      status: 'pending',
+      createdAt: Date.now()
+    };
+
+    await db.downloadQueue.put(item);
+    this.processDownloadQueue();
+  }
+
+  async processDownloadQueue() {
+    const pending = await db.downloadQueue.where('status').equals('pending').toArray();
+    for (const item of pending) {
+      await this.downloadItem(item);
+    }
+  }
+
+  private async downloadItem(item: DownloadQueueItem) {
+    const file = await db.files.get(item.id);
+    if (!file) {
+      await db.downloadQueue.update(item.id, { status: 'failed', error: 'File not found' });
+      return;
+    }
+
+    await db.downloadQueue.update(item.id, { status: 'downloading' });
+
     try {
       const client = await getClient();
+      const isNative = Capacitor.isNativePlatform();
       let blobParts: BlobPart[] = [];
+      let nativePath = '';
+
+      if (isNative) {
+        // Prepare file on native filesystem
+        const check = await Filesystem.readdir({
+           path: '',
+           directory: Directory.Documents
+        });
+        // Just ensuring directory is accessible.
+        nativePath = file.name;
+      }
       
+      const processBuffer = async (buffer: Buffer, currentIdx: number, totalParts: number) => {
+        if (isNative) {
+          // Convert buffer to base64 and append
+          const base64 = buffer.toString('base64');
+          await Filesystem.appendFile({
+            path: nativePath,
+            data: base64,
+            directory: Directory.Documents
+          });
+        } else {
+          blobParts.push(new Uint8Array(buffer as any));
+        }
+      };
+
       if (file.isChunked) {
-        // Find all chunks. Telegram messages in the channel are sequential if uploaded together
         const result = await client.invoke(new Api.messages.GetHistory({
           peer: file.telegramChannelId! as any,
-          offsetId: file.telegramMessageId! - 1, // Start just before the first chunk
+          offsetId: file.telegramMessageId! - 1,
           limit: file.totalChunks,
           addOffset: 0
         }));
@@ -172,15 +235,16 @@ export class TransferManager {
           // @ts-ignore
           const messages = result.messages.sort((a, b) => a.id - b.id);
           for (let i = 0; i < messages.length; i++) {
-             // download each chunk
              const buffer = await client.downloadMedia(messages[i], {
-               progressCallback: (progress: any) => console.log(`Downloading chunk ${i+1}/${file.totalChunks}: ${progress}`)
+               progressCallback: (progress: any) => {
+                 const overall = (i + Number(progress)) / file.totalChunks;
+                 db.downloadQueue.update(item.id, { progress: overall });
+               }
              });
-             if (buffer) blobParts.push(new Uint8Array(buffer as any));
+             if (buffer) await processBuffer(buffer as Buffer, i, file.totalChunks);
           }
         }
       } else {
-        // Single file
         const result = await client.invoke(new Api.messages.GetMessages({
           id: [new Api.InputMessageID({ id: file.telegramMessageId! })]
         }));
@@ -188,16 +252,20 @@ export class TransferManager {
         // @ts-ignore
         if (result.messages && result.messages.length > 0) {
           // @ts-ignore
-          const buffer = await client.downloadMedia(result.messages[0]);
-          if (buffer) blobParts.push(new Uint8Array(buffer as any));
+          const buffer = await client.downloadMedia(result.messages[0], {
+            progressCallback: (progress: any) => {
+              db.downloadQueue.update(item.id, { progress: Number(progress) });
+            }
+          });
+          if (buffer) await processBuffer(buffer as Buffer, 0, 1);
         }
       }
 
-      if (blobParts.length > 0) {
+      await db.downloadQueue.update(item.id, { status: 'completed', progress: 1 });
+
+      if (!isNative && blobParts.length > 0) {
         const assembledBlob = new Blob(blobParts, { type: file.mimeType });
         const url = URL.createObjectURL(assembledBlob);
-        
-        // Simple trigger for download in browser
         const a = document.createElement('a');
         a.href = url;
         a.download = file.name;
@@ -205,10 +273,16 @@ export class TransferManager {
         a.click();
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 10000);
+      } else if (isNative) {
+        const uri = await Filesystem.getUri({
+          path: nativePath,
+          directory: Directory.Documents
+        });
+        alert(`Downloaded to: ${uri.uri}`);
       }
-
-    } catch (e) {
+    } catch (e: any) {
       console.error('Download failed', e);
+      await db.downloadQueue.update(item.id, { status: 'failed', error: e.message });
     }
   }
 }

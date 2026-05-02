@@ -40,19 +40,31 @@ export interface UploadQueueItem {
   createdAt: number;
 }
 
+export interface DownloadQueueItem {
+  id: string; // file UUID
+  name: string;
+  size: number;
+  progress: number;
+  status: 'pending' | 'downloading' | 'failed' | 'completed';
+  error?: string;
+  createdAt: number;
+}
+
 class TeleDriveDB extends Dexie {
   files!: EntityTable<DriveFile, 'id'>;
   folders!: EntityTable<DriveFolder, 'id'>;
   syncState!: EntityTable<DriveSyncState, 'key'>;
   uploadQueue!: EntityTable<UploadQueueItem, 'id'>;
+  downloadQueue!: EntityTable<DownloadQueueItem, 'id'>;
 
   constructor() {
     super('TeleDriveDB');
-    this.version(1).stores({
+    this.version(2).stores({
       files: 'id, name, folderId, telegramMessageId, createdAt',
       folders: 'id, parentId, name, createdAt',
       syncState: 'key',
-      uploadQueue: 'id, status, folderId, createdAt'
+      uploadQueue: 'id, status, folderId, createdAt',
+      downloadQueue: 'id, status, createdAt'
     });
   }
 }
