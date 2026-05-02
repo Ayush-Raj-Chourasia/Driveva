@@ -153,15 +153,14 @@ export class TransferManager {
               await client.connect();
             }
 
+            // PASS BUFFER DIRECTLY - gramjs handles part uploading
             result = await client.sendFile(channelId as any, {
-              file: new Api.InputFile({
-                id: BigInt(Date.now() + i) as any,
-                parts: 1,
-                name: chunkName,
-                md5Checksum: ''
-              }),
+              file: buffer,
               caption: isChunked ? `CHUNK|${item.id}|${i + 1}|${totalChunks}` : undefined,
               forceDocument: true,
+              attributes: [
+                new Api.DocumentAttributeFilename({ fileName: chunkName })
+              ],
               progressCallback: (progress: any) => {
                 const overallProgress = (i + Number(progress)) / totalChunks;
                 db.uploadQueue.update(item.id!, { progress: overallProgress });
@@ -180,27 +179,6 @@ export class TransferManager {
             } else {
               await new Promise(r => setTimeout(r, 2000 * retries));
             }
-          }
-        }
-
-        // Fallback: try sendFile with buffer directly
-        if (!result) {
-          try {
-            result = await client.sendFile(channelId as any, {
-              file: buffer,
-              caption: isChunked ? `CHUNK|${item.id}|${i + 1}|${totalChunks}` : undefined,
-              forceDocument: true,
-              attributes: [
-                new Api.DocumentAttributeFilename({ fileName: chunkName })
-              ],
-              progressCallback: (progress: any) => {
-                const overallProgress = (i + Number(progress)) / totalChunks;
-                db.uploadQueue.update(item.id!, { progress: overallProgress });
-              }
-            });
-          } catch (bufferErr: any) {
-            console.error(`Buffer upload also failed for chunk ${i + 1}:`, bufferErr.message);
-            throw bufferErr;
           }
         }
 
