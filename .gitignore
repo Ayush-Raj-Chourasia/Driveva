@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 stitch_teledrive_cloud_ui
+*.txt

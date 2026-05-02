@@ -9,17 +9,16 @@ import TopNav from './components/TopNav';
 import BottomNav from './components/BottomNav';
 import DriveView from './views/DriveView';
 import SettingsView from './views/SettingsView';
-import UploadView from './views/UploadView';
-import PreviewView from './views/PreviewView';
+import RecentView from './views/RecentView';
+import SharedView from './views/SharedView';
 import LoginView from './views/LoginView';
 import { db } from './lib/db';
 import TransferOverlay from './components/TransferOverlay';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('drive');
-  const [isUploading, setIsUploading] = useState(false);
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     checkAuth();
@@ -30,10 +29,23 @@ export default function App() {
     setIsAuthenticated(!!sessionState?.value);
   };
 
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+  };
+
   if (isAuthenticated === null) {
-    return <div className="min-h-screen bg-background flex items-center justify-center text-primary font-bold">
-      <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>⏳</motion.div>
-    </div>;
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <motion.div
+            animate={{ rotate: 360 }}
+            transition={{ repeat: Infinity, duration: 1.5, ease: 'linear' }}
+            className="w-10 h-10 border-3 border-primary border-t-transparent rounded-full"
+          />
+          <p className="text-sm font-bold text-on-surface-variant">Loading TeleDrive...</p>
+        </div>
+      </div>
+    );
   }
 
   if (!isAuthenticated) {
@@ -44,50 +56,41 @@ export default function App() {
     );
   }
 
-  // Simple state-based routing
   const renderContent = () => {
     switch (activeTab) {
       case 'drive':
-        return <DriveView key="drive" />;
-      case 'settings':
-        return <SettingsView key="settings" />;
+        return <DriveView key="drive" searchQuery={searchQuery || undefined} />;
       case 'shared':
+        return <SharedView key="shared" />;
       case 'recent':
-        return (
-          <div className="flex flex-col items-center justify-center h-[50vh] text-center opacity-40">
-            <div className="w-24 h-24 rounded-full bg-surface-container-highest flex items-center justify-center mb-4 text-4xl">
-              {activeTab === 'shared' ? '👥' : '🕒'}
-            </div>
-            <h2 className="text-xl font-bold">Soon!</h2>
-            <p className="text-sm">This section is under construction.</p>
-          </div>
-        );
+        return <RecentView key="recent" />;
+      case 'settings':
+        return <SettingsView key="settings" onLogout={handleLogout} />;
       default:
         return <DriveView key="drive" />;
     }
   };
 
   return (
-    <div className="min-h-screen bg-background pb-32 overflow-x-hidden">
-      <TopNav />
-      
-      <main className="pt-24 px-6 max-w-7xl mx-auto">
+    <div className="min-h-screen bg-background pb-24 overflow-x-hidden">
+      <TopNav onSearch={setSearchQuery} />
+
+      <main className="pt-20 px-4 max-w-7xl mx-auto">
         <AnimatePresence mode="wait">
-          {renderContent()}
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+          >
+            {renderContent()}
+          </motion.div>
         </AnimatePresence>
       </main>
 
-      <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />
+      <BottomNav activeTab={activeTab} onTabChange={(tab) => { setActiveTab(tab); setSearchQuery(''); }} />
       <TransferOverlay />
-
-      <AnimatePresence>
-        {isUploading && (
-          <UploadView onCancel={() => setIsUploading(false)} />
-        )}
-        {isPreviewOpen && (
-          <PreviewView onClose={() => setIsPreviewOpen(false)} />
-        )}
-      </AnimatePresence>
     </div>
   );
 }

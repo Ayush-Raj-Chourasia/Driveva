@@ -7,6 +7,9 @@ const CHANNEL_TITLE = 'TeleDrive_Storage_DoNotDelete';
 
 export async function getDriveChannelId(): Promise<bigint | number> {
   const client = await getClient();
+  if (!client.connected) {
+    await client.connect();
+  }
   const dialogs = await client.getDialogs({});
   
   for (const dialog of dialogs) {
@@ -34,6 +37,10 @@ export async function getDriveChannelId(): Promise<bigint | number> {
 
 export async function pushSyncState() {
   const client = await getClient();
+  if (!client.connected) {
+    await client.connect();
+  }
+
   const channelId = await getDriveChannelId();
 
   const files = await db.files.toArray();
@@ -49,13 +56,10 @@ export async function pushSyncState() {
   const stateJson = JSON.stringify(state);
   const buffer = Buffer.from(stateJson, 'utf-8');
 
-  // Convert string/buffer to a File-like object for gramjs
-  const fileToUpload = new File([buffer], 'index.json', { type: 'application/json' });
-
-  // Find the old pinned message and delete it to save space (optional, but good practice)
+  // Find the old pinned message and delete it to save space
   try {
     const searchResult = await client.invoke(new Api.messages.Search({
-      peer: channelId,
+      peer: channelId as any,
       q: '',
       filter: new Api.InputMessagesFilterPinned(),
       limit: 1,
@@ -66,7 +70,7 @@ export async function pushSyncState() {
        // @ts-ignore
       const oldMsg = searchResult.messages[0];
       await client.invoke(new Api.channels.DeleteMessages({
-        channel: channelId,
+        channel: channelId as any,
         id: [oldMsg.id]
       }));
     }
@@ -74,17 +78,20 @@ export async function pushSyncState() {
     console.warn('Could not delete old index message', e);
   }
 
-  // Upload new state
-  const uploaded = await client.sendFile(channelId, {
-    file: fileToUpload,
+  // Upload new state — use Buffer directly (not File object) for gramjs WebView compatibility
+  const uploaded = await client.sendFile(channelId as any, {
+    file: buffer,
     caption: 'TeleDrive_Index',
-    forceDocument: true
+    forceDocument: true,
+    attributes: [
+      new Api.DocumentAttributeFilename({ fileName: 'index.json' })
+    ]
   });
 
   // Pin it
   if (uploaded) {
     await client.invoke(new Api.messages.UpdatePinnedMessage({
-      peer: channelId,
+      peer: channelId as any,
       id: uploaded.id,
       pmOneside: false,
     }));
@@ -97,7 +104,7 @@ export async function pullSyncState() {
 
   // Get pinned message
   const result = await client.invoke(new Api.messages.Search({
-    peer: channelId,
+    peer: channelId as any,
     q: '',
     filter: new Api.InputMessagesFilterPinned(),
     limit: 1,
@@ -108,7 +115,7 @@ export async function pullSyncState() {
     // @ts-ignore
     const indexMsg = result.messages[0];
     if (indexMsg.media && indexMsg.media.document) {
-      const buffer = await client.downloadMedia(indexMsg, { workers: 1 });
+      const buffer = await client.downloadMedia(indexMsg, {});
       if (buffer) {
         const stateJson = buffer.toString('utf-8');
         try {
