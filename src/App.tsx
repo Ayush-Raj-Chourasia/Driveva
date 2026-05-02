@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import TopNav from './components/TopNav';
 import BottomNav from './components/BottomNav';
@@ -11,11 +11,35 @@ import DriveView from './views/DriveView';
 import SettingsView from './views/SettingsView';
 import UploadView from './views/UploadView';
 import PreviewView from './views/PreviewView';
+import LoginView from './views/LoginView';
+import { db } from './lib/db';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('drive');
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  const checkAuth = async () => {
+    const sessionState = await db.syncState.get('telegram_session');
+    setIsAuthenticated(!!sessionState?.value);
+  };
+
+  if (isAuthenticated === null) {
+    return <div className="min-h-screen bg-background flex items-center justify-center">Loading...</div>;
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-background">
+        <LoginView onLogin={checkAuth} />
+      </div>
+    );
+  }
 
   // Simple state-based routing
   const renderContent = () => {
