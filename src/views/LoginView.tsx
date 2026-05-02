@@ -1,86 +1,67 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { getClient, saveSession } from '../lib/telegram/client';
 import { pullSyncState } from '../lib/telegram/sync';
-import { Api } from 'telegram';
 
 export default function LoginView({ onLogin }: { onLogin: () => void }) {
   const [step, setStep] = useState<'phone' | 'otp' | 'password'>('phone');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
-  const [phoneCodeHash, setPhoneCodeHash] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSendCode = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const client = await getClient();
-      const result = await client.sendCode(
-        // @ts-ignore
-        { apiId: 0, apiHash: '' }, // Not used directly in sendCode if passed in constructor
-        phone
-      );
-      setPhoneCodeHash(result.phoneCodeHash);
-      setStep('otp');
-    } catch (e: any) {
-      setError(e.message || 'Failed to send code');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const resolveCodeRef = useRef<(code: string) => void>(undefined);
+  const resolvePasswordRef = useRef<(pass: string) => void>(undefined);
 
-  const handleVerifyCode = async () => {
+  const handleStartLogin = async () => {
     setLoading(true);
     setError('');
     try {
       const client = await getClient();
-      await client.invoke(new Api.auth.SignIn({
+      await client.start({
         phoneNumber: phone,
-        phoneCodeHash,
-        phoneCode: code
-      }));
+        phoneCode: async () => {
+          setLoading(false);
+          setStep('otp');
+          return new Promise<string>((resolve) => {
+            resolveCodeRef.current = resolve;
+          });
+        },
+        password: async () => {
+          setLoading(false);
+          setStep('password');
+          return new Promise<string>((resolve) => {
+            resolvePasswordRef.current = resolve;
+          });
+        },
+        onError: (err: Error) => {
+          console.error(err);
+          setError(err.message);
+        },
+      });
+      
       await completeLogin(client);
     } catch (e: any) {
-      if (e.message.includes('SESSION_PASSWORD_NEEDED')) {
-        setStep('password');
-      } else {
-        setError(e.message || 'Invalid code');
-      }
-    } finally {
+      setError(e.message || 'Failed to login');
       setLoading(false);
     }
   };
 
-  const handlePassword = async () => {
+  const submitCode = () => {
     setLoading(true);
     setError('');
-    try {
-      const client = await getClient();
-      
-      // Calculate password hash using gramjs utils if needed, or check if CheckPassword accepts raw
-      // Gramjs CheckPassword requires calculating the hash. 
-      // A safer way in gramjs is to use signInWithPassword if available, or compute the hash.
-      // For simplicity in this wrapper, we assume 2FA might require computeCheckPasswordParams
-      // Let's use standard CheckPassword. If it fails, we might need the crypto implementation.
-      const algo = await client.invoke(new Api.account.GetPassword());
-      // Actually computing the password hash in gramjs requires complex SRP logic.
-      // GramJS has `client.signInWithPassword(password)` helper!
-      // Let's use the helper if possible, or fall back. 
-      // We will try client.signIn(undefined, undefined, password) or similar.
-      // For now, let's just use the known helper if it exists in the version we installed.
-      
-      // Let's assume user doesn't have 2FA for this hackathon-level prototype,
-      // OR we just show an error if 2FA is needed because full SRP in browser is heavy.
-      // But we included crypto polyfill, so it might work.
-      
-      await client.signIn(undefined, { password: async () => password, onError: (e) => { throw e; } });
-      await completeLogin(client);
-    } catch (e: any) {
-      setError(e.message || 'Invalid password');
-    } finally {
-      setLoading(false);
+    if (resolveCodeRef.current) {
+      resolveCodeRef.current(code);
+      resolveCodeRef.current = undefined;
+    }
+  };
+
+  const submitPassword = () => {
+    setLoading(true);
+    setError('');
+    if (resolvePasswordRef.current) {
+      resolvePasswordRef.current(password);
+      resolvePasswordRef.current = undefined;
     }
   };
 
@@ -111,11 +92,11 @@ export default function LoginView({ onLogin }: { onLogin: () => void }) {
               onChange={(e) => setPhone(e.target.value)}
             />
             <button 
-              onClick={handleSendCode}
+              onClick={handleStartLogin}
               disabled={loading || !phone}
               className="bg-primary text-on-primary py-3 rounded-xl font-bold hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
             >
-              {loading ? 'Sending...' : 'Send Code'}
+              {loading ? 'Connecting...' : 'Send Code'}
             </button>
           </div>
         )}
@@ -131,7 +112,7 @@ export default function LoginView({ onLogin }: { onLogin: () => void }) {
               onChange={(e) => setCode(e.target.value)}
             />
             <button 
-              onClick={handleVerifyCode}
+              onClick={submitCode}
               disabled={loading || !code}
               className="bg-primary text-on-primary py-3 rounded-xl font-bold hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
             >
@@ -151,7 +132,7 @@ export default function LoginView({ onLogin }: { onLogin: () => void }) {
               onChange={(e) => setPassword(e.target.value)}
             />
             <button 
-              onClick={handlePassword}
+              onClick={submitPassword}
               disabled={loading || !password}
               className="bg-primary text-on-primary py-3 rounded-xl font-bold hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
             >

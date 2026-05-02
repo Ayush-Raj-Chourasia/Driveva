@@ -143,7 +143,13 @@ export default function DriveView() {
                         {new Date(file.createdAt).toLocaleDateString()} • {formatSize(file.size)}
                       </p>
                     </div>
-                    <button className="p-2 text-outline hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        import('../lib/transferManager').then(m => m.transferManager.queueDownload(file.id));
+                      }}
+                      className="p-2 text-outline hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
                       <MoreVertical size={20} />
                     </button>
                   </motion.div>

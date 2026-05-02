@@ -4,7 +4,7 @@ import { getDriveChannelId, pushSyncState } from './telegram/sync';
 import { Api } from 'telegram';
 import { errors } from 'telegram';
 import { App } from '@capacitor/app';
-import { BackgroundTask } from '@capacitor/background-task';
+import { BackgroundTask } from '@capawesome/capacitor-background-task';
 
 const CHUNK_SIZE = 1.9 * 1024 * 1024 * 1024; // 1.9GB
 
@@ -100,12 +100,12 @@ export class TransferManager {
         const chunkName = isChunked ? `${file.name}.part${i+1}` : file.name;
         const chunkFile = new File([chunkBlob], chunkName, { type: file.type });
 
-        const result = await client.sendFile(channelId, {
+        const result = await client.sendFile(channelId as any, {
           file: chunkFile,
           caption: isChunked ? `Chunk ${i+1}/${totalChunks} of ${item.id}` : undefined,
           forceDocument: true,
-          progressCallback: (progress: number) => {
-            const overallProgress = (i + progress) / totalChunks;
+          progressCallback: (progress: any) => {
+            const overallProgress = (i + Number(progress)) / totalChunks;
             db.uploadQueue.update(item.id, { progress: overallProgress });
           }
         });
@@ -147,6 +147,68 @@ export class TransferManager {
         console.error('Upload failed', error);
         await db.uploadQueue.update(item.id, { status: 'failed', error: error.message });
       }
+    }
+  }
+
+  async queueDownload(fileId: string) {
+    const file = await db.files.get(fileId);
+    if (!file) return;
+
+    try {
+      const client = await getClient();
+      let blobParts: BlobPart[] = [];
+      
+      if (file.isChunked) {
+        // Find all chunks. Telegram messages in the channel are sequential if uploaded together
+        const result = await client.invoke(new Api.messages.GetHistory({
+          peer: file.telegramChannelId! as any,
+          offsetId: file.telegramMessageId! - 1, // Start just before the first chunk
+          limit: file.totalChunks,
+          addOffset: 0
+        }));
+
+        // @ts-ignore
+        if (result.messages) {
+          // @ts-ignore
+          const messages = result.messages.sort((a, b) => a.id - b.id);
+          for (let i = 0; i < messages.length; i++) {
+             // download each chunk
+             const buffer = await client.downloadMedia(messages[i], {
+               progressCallback: (progress: any) => console.log(`Downloading chunk ${i+1}/${file.totalChunks}: ${progress}`)
+             });
+             if (buffer) blobParts.push(new Uint8Array(buffer as any));
+          }
+        }
+      } else {
+        // Single file
+        const result = await client.invoke(new Api.messages.GetMessages({
+          id: [new Api.InputMessageID({ id: file.telegramMessageId! })]
+        }));
+        
+        // @ts-ignore
+        if (result.messages && result.messages.length > 0) {
+          // @ts-ignore
+          const buffer = await client.downloadMedia(result.messages[0]);
+          if (buffer) blobParts.push(new Uint8Array(buffer as any));
+        }
+      }
+
+      if (blobParts.length > 0) {
+        const assembledBlob = new Blob(blobParts, { type: file.mimeType });
+        const url = URL.createObjectURL(assembledBlob);
+        
+        // Simple trigger for download in browser
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+      }
+
+    } catch (e) {
+      console.error('Download failed', e);
     }
   }
 }
