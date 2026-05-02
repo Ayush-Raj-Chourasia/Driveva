@@ -13,6 +13,7 @@ export interface DriveFile {
   createdAt: number;
   updatedAt: number;
   lastOpenedAt?: number;
+  checksum?: string;
 }
 
 export interface DriveFolder {
@@ -41,6 +42,7 @@ export interface UploadQueueItem {
   totalChunks?: number;
   mimeType: string;
   createdAt: number;
+  checksum?: string;
 }
 
 export interface DownloadQueueItem {
@@ -68,11 +70,11 @@ class TeleDriveDB extends Dexie {
 
   constructor() {
     super('TeleDriveDB');
-    this.version(3).stores({
-      files: 'id, name, folderId, telegramMessageId, createdAt, updatedAt, lastOpenedAt',
+    this.version(4).stores({
+      files: 'id, name, folderId, telegramMessageId, checksum, createdAt, updatedAt, lastOpenedAt',
       folders: 'id, parentId, name, createdAt',
       syncState: 'key',
-      uploadQueue: 'id, status, folderId, createdAt',
+      uploadQueue: 'id, status, folderId, checksum, createdAt',
       downloadQueue: 'id, status, createdAt',
       settings: 'key'
     });

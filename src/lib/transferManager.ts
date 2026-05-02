@@ -1,4 +1,4 @@
-import { db, type UploadQueueItem, type DownloadQueueItem } from './db';
+import { db, type UploadQueueItem, type DownloadQueueItem, type DriveFile } from './db';
 import { getClient } from './telegram/client';
 import { getDriveChannelId, pushSyncState } from './telegram/sync';
 import { Api } from 'telegram';
@@ -10,8 +10,17 @@ import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Buffer } from 'buffer';
 
 const CHUNK_SIZE = 500 * 1024 * 1024; // 500MB chunks
+const MAX_CONCURRENT_UPLOADS = 3;
+const MAX_CONCURRENT_DOWNLOADS = 2;
 
-/** Convert a browser File/Blob to a Buffer that gramjs can use */
+/** Calculate SHA-256 checksum of a file */
+async function calculateChecksum(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function fileToBuffer(file: File | Blob): Promise<Buffer> {
   const arrayBuffer = await file.arrayBuffer();
   return Buffer.from(arrayBuffer);
@@ -19,8 +28,8 @@ async function fileToBuffer(file: File | Blob): Promise<Buffer> {
 
 export class TransferManager {
   private static instance: TransferManager;
-  private isProcessingUploads = false;
-  private isProcessingDownloads = false;
+  private activeUploads = 0;
+  private activeDownloads = 0;
   private pauseRequested = false;
 
   private constructor() {
@@ -36,7 +45,6 @@ export class TransferManager {
   }
 
   private async init() {
-    // Small delay to let the client connect
     setTimeout(() => {
       this.processQueue();
       this.processDownloadQueue();
@@ -46,9 +54,9 @@ export class TransferManager {
   private setupBackgroundHooks() {
     if (Capacitor.isNativePlatform()) {
       App.addListener('appStateChange', async ({ isActive }) => {
-        if (!isActive && (this.isProcessingUploads || this.isProcessingDownloads)) {
+        if (!isActive && (this.activeUploads > 0 || this.activeDownloads > 0)) {
           const taskId = await BackgroundTask.beforeExit(async () => {
-            while (this.isProcessingUploads || this.isProcessingDownloads) {
+            while (this.activeUploads > 0 || this.activeDownloads > 0) {
               await new Promise(r => setTimeout(r, 1000));
             }
             BackgroundTask.finish({ taskId });
@@ -59,6 +67,25 @@ export class TransferManager {
   }
 
   async queueUpload(file: File, folderId: string | null) {
+    const checksum = await calculateChecksum(file);
+    
+    // Check for duplicate
+    const existing = await db.files.where('checksum').equals(checksum).first();
+    if (existing) {
+      console.log('Duplicate file detected, skipping upload:', file.name);
+      // Just add to local DB with new name/folder if needed, but reuse Telegram metadata
+      await db.files.put({
+        ...existing,
+        id: crypto.randomUUID(),
+        name: file.name,
+        folderId,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      await pushSyncState();
+      return;
+    }
+
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const item: UploadQueueItem = {
       id: crypto.randomUUID(),
@@ -70,12 +97,11 @@ export class TransferManager {
       mimeType: file.type || 'application/octet-stream',
       createdAt: Date.now(),
       currentChunk: 0,
-      totalChunks
+      totalChunks,
+      checksum
     };
 
     await db.uploadQueue.put(item);
-
-    // Store file reference in memory
     // @ts-ignore
     window[`file_${item.id}`] = file;
 
@@ -84,27 +110,23 @@ export class TransferManager {
   }
 
   async processQueue() {
-    if (this.isProcessingUploads || this.pauseRequested) return;
-    this.isProcessingUploads = true;
+    if (this.pauseRequested) return;
+    if (this.activeUploads >= MAX_CONCURRENT_UPLOADS) return;
 
-    try {
-      const pending = await db.uploadQueue
-        .where('status')
-        .anyOf(['pending', 'uploading'])
-        .toArray();
+    const pending = await db.uploadQueue
+      .where('status')
+      .anyOf(['pending', 'uploading'])
+      .limit(MAX_CONCURRENT_UPLOADS - this.activeUploads)
+      .toArray();
 
-      for (const item of pending) {
-        if (this.pauseRequested) break;
-        await this.uploadItem(item);
-      }
-    } catch (e) {
-      console.error('Queue processing error:', e);
-    } finally {
-      this.isProcessingUploads = false;
+    for (const item of pending) {
+      if (item.status === 'uploading') continue; // Already being handled
+      this.uploadItem(item);
     }
   }
 
   private async uploadItem(item: UploadQueueItem) {
+    this.activeUploads++;
     await db.uploadQueue.update(item.id!, { status: 'uploading' });
 
     // @ts-ignore
@@ -113,25 +135,24 @@ export class TransferManager {
     if (!file) {
       await db.uploadQueue.update(item.id!, {
         status: 'failed',
-        error: 'File reference lost. Please re-select the file.'
+        error: 'File reference lost.'
       });
+      this.activeUploads--;
+      this.processQueue();
       return;
     }
 
     try {
       const client = await getClient();
-      if (!client.connected) {
-        await client.connect();
-      }
-
       const channelId = await getDriveChannelId();
-      const totalChunks = item.totalChunks || Math.ceil(file.size / CHUNK_SIZE);
+      const totalChunks = item.totalChunks || 1;
       const isChunked = totalChunks > 1;
       let firstMsgId: number | undefined;
 
       for (let i = item.currentChunk || 0; i < totalChunks; i++) {
         if (this.pauseRequested) {
           await db.uploadQueue.update(item.id!, { status: 'paused', currentChunk: i });
+          this.activeUploads--;
           return;
         }
 
@@ -139,114 +160,126 @@ export class TransferManager {
         const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunkBlob = file.slice(start, end);
         const chunkName = isChunked ? `${file.name}.part${i + 1}` : file.name;
-
-        // CRITICAL: Convert File/Blob to Buffer for gramjs compatibility
         const buffer = await fileToBuffer(chunkBlob);
 
         let retries = 0;
-        const maxRetries = 3;
         let result: any = null;
 
-        while (retries < maxRetries) {
+        while (retries < 3) {
           try {
-            if (!client.connected) {
-              await client.connect();
-            }
-
-            // PASS BUFFER DIRECTLY - gramjs handles part uploading
+            if (!client.connected) await client.connect();
             result = await client.sendFile(channelId as any, {
               file: buffer,
               caption: isChunked ? `CHUNK|${item.id}|${i + 1}|${totalChunks}` : undefined,
               forceDocument: true,
-              attributes: [
-                new Api.DocumentAttributeFilename({ fileName: chunkName })
-              ],
+              attributes: [new Api.DocumentAttributeFilename({ fileName: chunkName })],
               progressCallback: (progress: any) => {
                 const overallProgress = (i + Number(progress)) / totalChunks;
                 db.uploadQueue.update(item.id!, { progress: overallProgress });
               }
             });
-            break; // Success
-          } catch (uploadErr: any) {
+            break;
+          } catch (e: any) {
             retries++;
-            console.warn(`Upload attempt ${retries} failed for chunk ${i + 1}:`, uploadErr.message);
-
-            if (uploadErr instanceof errors.FloodWaitError) {
-              console.warn(`Flood wait: ${uploadErr.seconds}s`);
-              await new Promise(r => setTimeout(r, uploadErr.seconds * 1000));
-            } else if (retries >= maxRetries) {
-              throw uploadErr;
+            if (e instanceof errors.FloodWaitError) {
+              await new Promise(r => setTimeout(r, e.seconds * 1000));
             } else {
               await new Promise(r => setTimeout(r, 2000 * retries));
             }
           }
         }
 
-        if (i === 0 && result) {
-          firstMsgId = result.id;
-        }
-
-        // Save chunk progress
+        if (!result) throw new Error('Failed to upload chunk after retries');
+        if (i === 0) firstMsgId = result.id;
         await db.uploadQueue.update(item.id!, { currentChunk: i + 1 });
       }
 
-      // Upload complete
       await db.uploadQueue.update(item.id!, { status: 'completed', progress: 1 });
-
-      // Save file metadata to Dexie
       await db.files.put({
         id: item.id!,
         name: item.name,
         size: item.size,
         mimeType: item.mimeType,
         telegramMessageId: firstMsgId,
-        telegramChannelId: typeof channelId === 'number' ? channelId : Number(channelId),
+        telegramChannelId: Number(channelId),
         isChunked,
         totalChunks,
         folderId: item.folderId,
         createdAt: item.createdAt,
-        updatedAt: Date.now()
+        updatedAt: Date.now(),
+        checksum: item.checksum
       });
 
-      // Clean up file reference
       // @ts-ignore
       delete window[`file_${item.id}`];
-
-      // Sync metadata to Telegram
-      try {
-        await pushSyncState();
-      } catch (syncErr) {
-        console.warn('Failed to sync state after upload:', syncErr);
-      }
+      await pushSyncState();
 
     } catch (error: any) {
       console.error('Upload failed:', error.message);
-
-      if (error instanceof errors.FloodWaitError) {
-        this.pauseRequested = true;
-        await db.uploadQueue.update(item.id!, { status: 'pending' });
-        setTimeout(() => {
-          this.pauseRequested = false;
-          this.processQueue();
-        }, error.seconds * 1000);
-      } else {
-        await db.uploadQueue.update(item.id!, {
-          status: 'failed',
-          error: error.message || 'Upload failed'
-        });
-      }
+      await db.uploadQueue.update(item.id!, { status: 'failed', error: error.message });
+    } finally {
+      this.activeUploads--;
+      this.processQueue();
     }
   }
 
-  async retryUpload(itemId: string) {
-    await db.uploadQueue.update(itemId, { status: 'pending', error: undefined });
-    this.processQueue();
+  // ============ DELETION ============
+
+  async deleteFile(fileId: string) {
+    const file = await db.files.get(fileId);
+    if (!file) return;
+
+    try {
+      const client = await getClient();
+      const channelId = await getDriveChannelId();
+      
+      // Delete from Telegram
+      if (file.telegramMessageId) {
+        if (file.isChunked) {
+          // If chunked, we need to find all related messages. 
+          // For now, we delete the primary one, and the user can manually clean or we implement chunk tracking.
+          // Better approach: search messages with the fileId in caption
+          const searchResult = await client.invoke(new Api.messages.Search({
+            peer: channelId as any,
+            q: file.id,
+            filter: new Api.InputMessagesFilterDocument(),
+            limit: 100
+          }));
+          // @ts-ignore
+          if (searchResult.messages) {
+            // @ts-ignore
+            const ids = searchResult.messages.map(m => m.id);
+            await client.invoke(new Api.channels.DeleteMessages({
+              channel: channelId as any,
+              id: ids
+            }));
+          }
+        } else {
+          await client.invoke(new Api.channels.DeleteMessages({
+            channel: channelId as any,
+            id: [file.telegramMessageId]
+          }));
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to delete from Telegram, removing locally anyway:', e);
+    }
+
+    await db.files.delete(fileId);
+    await pushSyncState();
   }
 
-  async cancelUpload(itemId: string) {
-    // @ts-ignore
-    delete window[`file_${itemId}`];
-    await db.uploadQueue.delete(itemId);
+  async batchDelete(fileIds: string[]) {
+    for (const id of fileIds) {
+      await this.deleteFile(id);
+    }
+  }
+
+  // ============ RENAME ============
+
+  async renameFile(fileId: string, newName: string) {
+    await db.files.update(fileId, { name: newName, updatedAt: Date.now() });
+    await pushSyncState();
   }
 
   // ============ DOWNLOADS ============
@@ -254,51 +287,41 @@ export class TransferManager {
   async queueDownload(fileId: string) {
     const file = await db.files.get(fileId);
     if (!file) return;
-
-    // Update lastOpenedAt
     await db.files.update(fileId, { lastOpenedAt: Date.now() });
-
-    // Check if already queued
     const existing = await db.downloadQueue.get(fileId);
     if (existing && (existing.status === 'downloading' || existing.status === 'pending')) return;
 
-    const item: DownloadQueueItem = {
+    await db.downloadQueue.put({
       id: file.id,
       name: file.name,
       size: file.size,
       progress: 0,
       status: 'pending',
       createdAt: Date.now()
-    };
-
-    await db.downloadQueue.put(item);
+    });
     this.processDownloadQueue();
   }
 
   async processDownloadQueue() {
-    if (this.isProcessingDownloads) return;
-    this.isProcessingDownloads = true;
+    if (this.activeDownloads >= MAX_CONCURRENT_DOWNLOADS) return;
+    const pending = await db.downloadQueue
+      .where('status')
+      .anyOf(['pending'])
+      .limit(MAX_CONCURRENT_DOWNLOADS - this.activeDownloads)
+      .toArray();
 
-    try {
-      const pending = await db.downloadQueue
-        .where('status')
-        .anyOf(['pending'])
-        .toArray();
-
-      for (const item of pending) {
-        await this.downloadItem(item);
-      }
-    } catch (e) {
-      console.error('Download queue error:', e);
-    } finally {
-      this.isProcessingDownloads = false;
+    for (const item of pending) {
+      this.downloadItem(item);
     }
   }
 
   private async downloadItem(item: DownloadQueueItem) {
+    this.activeDownloads++;
     const file = await db.files.get(item.id);
     if (!file) {
-      await db.downloadQueue.update(item.id, { status: 'failed', error: 'File metadata not found' });
+      await db.downloadQueue.update(item.id, { status: 'failed', error: 'File not found' });
+      this.activeDownloads--;
+      this.processDownloadQueue();
       return;
     }
 
@@ -306,73 +329,35 @@ export class TransferManager {
 
     try {
       const client = await getClient();
-      if (!client.connected) {
-        await client.connect();
-      }
-
       const isNative = Capacitor.isNativePlatform();
       let blobParts: Uint8Array[] = [];
 
       if (file.isChunked) {
-        // Fetch chunked file messages
-        const result = await client.invoke(new Api.messages.GetHistory({
-          peer: file.telegramChannelId! as any,
-          offsetId: file.telegramMessageId! + file.totalChunks,
-          limit: file.totalChunks + 5,
-          addOffset: 0
+        const channelId = await getDriveChannelId();
+        const searchResult = await client.invoke(new Api.messages.Search({
+          peer: channelId as any,
+          q: file.id,
+          filter: new Api.InputMessagesFilterDocument(),
+          limit: 100
         }));
-
+        
         // @ts-ignore
-        if (result.messages) {
-          // @ts-ignore
-          const messages = result.messages
-            .filter((m: any) => m.media)
-            .sort((a: any, b: any) => a.id - b.id);
+        const messages = (searchResult.messages || [])
+          .filter((m: any) => m.media)
+          .sort((a: any, b: any) => a.id - b.id);
 
-          for (let i = 0; i < messages.length; i++) {
-            const buffer = await client.downloadMedia(messages[i], {
-              progressCallback: (progress: any) => {
-                const overall = (i + Number(progress)) / file.totalChunks;
-                db.downloadQueue.update(item.id, { progress: overall });
-              }
-            });
-
-            if (buffer) {
-              if (isNative) {
-                const base64 = Buffer.from(buffer as any).toString('base64');
-                await Filesystem.appendFile({
-                  path: file.name,
-                  data: base64,
-                  directory: Directory.Documents
-                });
-              } else {
-                blobParts.push(new Uint8Array(buffer as any));
-              }
-            }
-          }
-        }
-      } else {
-        // Single file download
-        const result = await client.invoke(new Api.messages.GetMessages({
-          id: [new Api.InputMessageID({ id: file.telegramMessageId! })]
-        }));
-
-        // @ts-ignore
-        if (result.messages && result.messages.length > 0) {
-          // @ts-ignore
-          const msg = result.messages[0];
-          const buffer = await client.downloadMedia(msg, {
-            progressCallback: (progress: any) => {
-              db.downloadQueue.update(item.id, { progress: Number(progress) });
+        for (let i = 0; i < messages.length; i++) {
+          const buffer = await client.downloadMedia(messages[i], {
+            progressCallback: (p: any) => {
+              const overall = (i + Number(p)) / messages.length;
+              db.downloadQueue.update(item.id, { progress: overall });
             }
           });
-
           if (buffer) {
             if (isNative) {
-              const base64 = Buffer.from(buffer as any).toString('base64');
-              await Filesystem.writeFile({
+              await Filesystem.appendFile({
                 path: file.name,
-                data: base64,
+                data: Buffer.from(buffer as any).toString('base64'),
                 directory: Directory.Documents
               });
             } else {
@@ -380,38 +365,47 @@ export class TransferManager {
             }
           }
         }
+      } else {
+        const result = await client.invoke(new Api.messages.GetMessages({
+          id: [new Api.InputMessageID({ id: file.telegramMessageId! })]
+        }));
+        // @ts-ignore
+        const msg = result.messages[0];
+        const buffer = await client.downloadMedia(msg, {
+          progressCallback: (p: any) => db.downloadQueue.update(item.id, { progress: Number(p) })
+        });
+        if (buffer) {
+          if (isNative) {
+            await Filesystem.writeFile({
+              path: file.name,
+              data: Buffer.from(buffer as any).toString('base64'),
+              directory: Directory.Documents
+            });
+          } else {
+            blobParts.push(new Uint8Array(buffer as any));
+          }
+        }
       }
 
       await db.downloadQueue.update(item.id, { status: 'completed', progress: 1 });
-
-      // Trigger download in browser or show native path
       if (!isNative && blobParts.length > 0) {
-        const assembledBlob = new Blob(blobParts as any, { type: file.mimeType });
-        const url = URL.createObjectURL(assembledBlob);
+        const url = URL.createObjectURL(new Blob(blobParts as any, { type: file.mimeType }));
         const a = document.createElement('a');
-        a.href = url;
-        a.download = file.name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        a.href = url; a.download = file.name; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 10000);
-      } else if (isNative) {
-        const uri = await Filesystem.getUri({
-          path: file.name,
-          directory: Directory.Documents
-        });
-        console.log('Downloaded to:', uri.uri);
       }
-
-      // Auto-clean completed downloads after 5s
-      setTimeout(() => {
-        db.downloadQueue.delete(item.id);
-      }, 5000);
-
+      setTimeout(() => db.downloadQueue.delete(item.id), 5000);
     } catch (e: any) {
-      console.error('Download failed:', e.message);
       await db.downloadQueue.update(item.id, { status: 'failed', error: e.message });
+    } finally {
+      this.activeDownloads--;
+      this.processDownloadQueue();
     }
+  }
+
+  async retryUpload(itemId: string) {
+    await db.uploadQueue.update(itemId, { status: 'pending', error: undefined });
+    this.processQueue();
   }
 }
 

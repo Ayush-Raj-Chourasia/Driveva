@@ -22,7 +22,7 @@ export default function TopNav({ onSearch }: TopNavProps) {
   };
 
   return (
-    <header className="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-4 h-14 bg-white/80 backdrop-blur-lg border-b border-white/20 shadow-sm">
+    <header className="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-4 h-14 bg-surface/80 backdrop-blur-lg border-b border-outline-variant/20 shadow-sm">
       <AnimatePresence mode="wait">
         {isSearchOpen ? (
           <motion.div
